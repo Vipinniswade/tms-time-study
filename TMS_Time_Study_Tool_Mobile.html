@@ -779,6 +779,7 @@ let shuffleEnabled = false;
 let draggedProcessIndex = null;
 let pageZoom = 1;
 const MAX_SAVED_TIMER_MS = 365 * 24 * 60 * 60 * 1000;
+const TIMER_CHECKPOINT_KEY = "TMS_Time_Study_Active_Timer";
 const STUDY_DB_NAME = "TMS_Time_Study_Data";
 const STUDY_STORE_NAME = "studies";
 const SUPABASE_URL = "https://tcizfxqhpmvziecixajm.supabase.co";
@@ -800,6 +801,32 @@ function getValidTimerStartTime(value) {
   let start = Number(value);
   let now = Date.now();
   return Number.isFinite(start) && start >= 1577836800000 && start <= now + 60000 && now - start <= MAX_SAVED_TIMER_MS ? start : 0;
+}
+
+function ensureSessionId() {
+  if (!sessionId) sessionId = "study-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+function saveTimerCheckpoint() {
+  try {
+    ensureSessionId();
+    localStorage.setItem(TIMER_CHECKPOINT_KEY, JSON.stringify({
+      sessionId: sessionId,
+      savedAt: Date.now(),
+      currentTimer: { elapsedMs: normalizeElapsedMs(elapsedMs), running: running, startedAt: running ? startTime : null },
+      processTimerStates: processTimerStates.map(state => ({ elapsedMs: normalizeElapsedMs(state.elapsedMs), running: state.running, startedAt: state.running ? state.startTime : null })),
+      assemblyElapsedMs: normalizeElapsedMs(assemblyElapsedMs),
+      assemblyRunning: assemblyRunning,
+      assemblyStartedAt: assemblyRunning ? assemblyStartTime : null
+    }));
+  } catch (_) { /* IndexedDB remains the fallback if local storage is unavailable. */ }
+}
+
+function getTimerCheckpoint(studyId) {
+  try {
+    let checkpoint = JSON.parse(localStorage.getItem(TIMER_CHECKPOINT_KEY) || "null");
+    return checkpoint && checkpoint.sessionId === studyId ? checkpoint : null;
+  } catch (_) { return null; }
 }
 
 function updateCloudControls() {
@@ -1216,6 +1243,7 @@ function startAssemblyTimer() {
   assemblyStartTime = Date.now() - assemblyElapsedMs;
   assemblyInterval = setInterval(updateAssemblyTimerDisplay, 100);
   assemblyRunning = true;
+  saveTimerCheckpoint();
   saveStudy(true);
 }
 
@@ -1249,6 +1277,7 @@ function pauseAssemblyTimer() {
   assemblyElapsedMs = Date.now() - assemblyStartTime;
   assemblyRunning = false;
   updateAssemblyTimerDisplay();
+  saveTimerCheckpoint();
   saveStudy(true);
 }
 
@@ -1438,6 +1467,7 @@ function startProcessTimer(index) {
   state.running = true;
   if (!processTimerInterval) processTimerInterval = setInterval(updateProcessTimerDisplays, 100);
   updateProcessTimerDisplays();
+  saveTimerCheckpoint();
 }
 
 function pauseProcessTimer(index) {
@@ -1450,6 +1480,7 @@ function pauseProcessTimer(index) {
     clearInterval(processTimerInterval);
     processTimerInterval = null;
   }
+  saveTimerCheckpoint();
 }
 
 function updateProcessTimerDisplays() {
@@ -1670,6 +1701,7 @@ function startTimer() {
     interval = setInterval(updateTimerDisplay, 20);
     running = true;
     startProcessTimer(currentIndex);
+    saveTimerCheckpoint();
     saveStudy(true);
   }
 }
@@ -1691,6 +1723,7 @@ function pauseTimer() {
   updateTimerDisplay();
   pauseProcessTimer(currentIndex);
   pauseAllMinorActivities();
+  saveTimerCheckpoint();
   saveStudy(true);
 }
 
@@ -2435,6 +2468,7 @@ async function restoreStudy(id) {
     database.close();
     if (!data) return;
     sessionId = data.id;
+    let timerCheckpoint = getTimerCheckpoint(sessionId);
     ["clientName", "companyName", "productName", "assemblyName", "operatorCount", "operatorNames", "assemblyRequirements", "numProcesses", "numObservations"].forEach(id => {
       document.getElementById(id).value = data[id] || "";
     });
@@ -2448,12 +2482,16 @@ async function restoreStudy(id) {
     processMaster = data.processMaster || [];
     records = data.records || [];
     currentIndex = typeof data.currentIndex === "number" ? data.currentIndex : findNextProcessIndex(0);
-    processTimerStates = (data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }))).map(state => {
+    let storedProcessTimers = timerCheckpoint?.processTimerStates || data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }));
+    processTimerStates = storedProcessTimers.map(state => {
       let startedAt = state.running ? getValidTimerStartTime(state.startedAt) : 0;
       return { elapsedMs: startedAt ? normalizeElapsedMs(Date.now() - startedAt) : normalizeElapsedMs(state.elapsedMs), startTime: startedAt, running: !!startedAt };
     });
-    let savedAssemblyStart = data.assemblyRunning ? getValidTimerStartTime(data.assemblyStartedAt) : 0;
-    assemblyElapsedMs = savedAssemblyStart ? normalizeElapsedMs(Date.now() - savedAssemblyStart) : normalizeElapsedMs(data.assemblyElapsedMs);
+    let storedAssemblyRunning = timerCheckpoint ? timerCheckpoint.assemblyRunning : data.assemblyRunning;
+    let storedAssemblyStart = timerCheckpoint ? timerCheckpoint.assemblyStartedAt : data.assemblyStartedAt;
+    let storedAssemblyElapsed = timerCheckpoint ? timerCheckpoint.assemblyElapsedMs : data.assemblyElapsedMs;
+    let savedAssemblyStart = storedAssemblyRunning ? getValidTimerStartTime(storedAssemblyStart) : 0;
+    assemblyElapsedMs = savedAssemblyStart ? normalizeElapsedMs(Date.now() - savedAssemblyStart) : normalizeElapsedMs(storedAssemblyElapsed);
     assemblyStudyStartedAt = data.assemblyStudyStartedAt ? new Date(data.assemblyStudyStartedAt) : null;
     assemblyStudyEndedAt = data.assemblyStudyEndedAt ? new Date(data.assemblyStudyEndedAt) : null;
     assemblyStudyStoppedAt = data.assemblyStudyStoppedAt ? new Date(data.assemblyStudyStoppedAt) : null;
@@ -2464,8 +2502,9 @@ async function restoreStudy(id) {
     hide("processInput");
     show("study");
     resetTimer();
-    let savedCurrentStart = data.currentTimer?.running ? getValidTimerStartTime(data.currentTimer.startedAt) : 0;
-    elapsedMs = savedCurrentStart ? normalizeElapsedMs(Date.now() - savedCurrentStart) : normalizeElapsedMs(data.currentTimer?.elapsedMs);
+    let storedCurrentTimer = timerCheckpoint?.currentTimer || data.currentTimer || {};
+    let savedCurrentStart = storedCurrentTimer.running ? getValidTimerStartTime(storedCurrentTimer.startedAt) : 0;
+    elapsedMs = savedCurrentStart ? normalizeElapsedMs(Date.now() - savedCurrentStart) : normalizeElapsedMs(storedCurrentTimer.elapsedMs);
     updateAssemblyTimerDisplay();
     updateAssemblyClockDisplay();
     buildTable();
@@ -2523,8 +2562,8 @@ document.addEventListener("input", event => {
 document.addEventListener("change", event => {
   if (event.target.matches("input, textarea, select")) saveStudy(true);
 });
-window.addEventListener("pagehide", () => saveStudy(true));
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveStudy(true); });
+window.addEventListener("pagehide", () => { saveTimerCheckpoint(); saveStudy(true); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") { saveTimerCheckpoint(); saveStudy(true); } });
 restorePageZoom();
 protectLocalStorage();
 initialiseCloudSync();
