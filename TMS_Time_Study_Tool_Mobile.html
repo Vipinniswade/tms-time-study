@@ -803,6 +803,15 @@ function getValidTimerStartTime(value) {
   return Number.isFinite(start) && start >= 1577836800000 && start <= now + 60000 && now - start <= MAX_SAVED_TIMER_MS ? start : 0;
 }
 
+function getSavedOrLegacyTimerStartTime(running, startedAt, elapsedMs, savedAt) {
+  if (!running) return 0;
+  let savedStart = getValidTimerStartTime(startedAt);
+  if (savedStart) return savedStart;
+  let savedTime = new Date(savedAt).getTime();
+  let elapsed = normalizeElapsedMs(elapsedMs);
+  return Number.isFinite(savedTime) ? getValidTimerStartTime(savedTime - elapsed) : 0;
+}
+
 function ensureSessionId() {
   if (!sessionId) sessionId = "study-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 }
@@ -2482,15 +2491,16 @@ async function restoreStudy(id) {
     processMaster = data.processMaster || [];
     records = data.records || [];
     currentIndex = typeof data.currentIndex === "number" ? data.currentIndex : findNextProcessIndex(0);
+    let timerStateSavedAt = timerCheckpoint?.savedAt || data.savedAt;
     let storedProcessTimers = timerCheckpoint?.processTimerStates || data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }));
     processTimerStates = storedProcessTimers.map(state => {
-      let startedAt = state.running ? getValidTimerStartTime(state.startedAt) : 0;
+      let startedAt = getSavedOrLegacyTimerStartTime(state.running, state.startedAt, state.elapsedMs, timerStateSavedAt);
       return { elapsedMs: startedAt ? normalizeElapsedMs(Date.now() - startedAt) : normalizeElapsedMs(state.elapsedMs), startTime: startedAt, running: !!startedAt };
     });
     let storedAssemblyRunning = timerCheckpoint ? timerCheckpoint.assemblyRunning : data.assemblyRunning;
     let storedAssemblyStart = timerCheckpoint ? timerCheckpoint.assemblyStartedAt : data.assemblyStartedAt;
     let storedAssemblyElapsed = timerCheckpoint ? timerCheckpoint.assemblyElapsedMs : data.assemblyElapsedMs;
-    let savedAssemblyStart = storedAssemblyRunning ? getValidTimerStartTime(storedAssemblyStart) : 0;
+    let savedAssemblyStart = getSavedOrLegacyTimerStartTime(storedAssemblyRunning, storedAssemblyStart, storedAssemblyElapsed, timerStateSavedAt);
     assemblyElapsedMs = savedAssemblyStart ? normalizeElapsedMs(Date.now() - savedAssemblyStart) : normalizeElapsedMs(storedAssemblyElapsed);
     assemblyStudyStartedAt = data.assemblyStudyStartedAt ? new Date(data.assemblyStudyStartedAt) : null;
     assemblyStudyEndedAt = data.assemblyStudyEndedAt ? new Date(data.assemblyStudyEndedAt) : null;
@@ -2503,7 +2513,7 @@ async function restoreStudy(id) {
     show("study");
     resetTimer();
     let storedCurrentTimer = timerCheckpoint?.currentTimer || data.currentTimer || {};
-    let savedCurrentStart = storedCurrentTimer.running ? getValidTimerStartTime(storedCurrentTimer.startedAt) : 0;
+    let savedCurrentStart = getSavedOrLegacyTimerStartTime(storedCurrentTimer.running, storedCurrentTimer.startedAt, storedCurrentTimer.elapsedMs, timerStateSavedAt);
     elapsedMs = savedCurrentStart ? normalizeElapsedMs(Date.now() - savedCurrentStart) : normalizeElapsedMs(storedCurrentTimer.elapsedMs);
     updateAssemblyTimerDisplay();
     updateAssemblyClockDisplay();
