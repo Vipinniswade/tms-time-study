@@ -423,7 +423,18 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       margin: 8px 0 4px;
       font-size: 24px;
       line-height: 1.25;
+      border: 0;
+      padding: 0;
+      color: inherit;
+      background: transparent;
+      font: inherit;
+      font-weight: 700;
+      text-align: left;
+      cursor: pointer;
     }
+
+    #currentProcess:hover { color: #bfdbfe; text-decoration: underline; }
+    .record-process-edit { border: 0; padding: 0; color: #175cd3; background: transparent; font: inherit; font-weight: 700; text-align: left; text-decoration: underline; cursor: pointer; }
 
     #currentSubAssembly {
       margin: 0;
@@ -636,7 +647,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         <div class="current-operation-header">
           <div>
             <div class="label">Current Operation</div>
-            <h3 id="currentProcess"></h3>
+            <button type="button" id="currentProcess" title="Edit process name" onclick="editCurrentProcessName()"></button>
             <p id="currentSubAssembly"></p>
           </div>
           <div class="current-reading-controls" aria-label="Current reading controls">
@@ -767,6 +778,7 @@ let sequenceEnabled = true;
 let shuffleEnabled = false;
 let draggedProcessIndex = null;
 let pageZoom = 1;
+const MAX_SAVED_TIMER_MS = 7 * 24 * 60 * 60 * 1000;
 const STUDY_DB_NAME = "TMS_Time_Study_Data";
 const STUDY_STORE_NAME = "studies";
 const SUPABASE_URL = "https://tcizfxqhpmvziecixajm.supabase.co";
@@ -777,6 +789,11 @@ let cloudUser = null;
 function setCloudStatus(message) {
   let status = document.getElementById("cloudSyncStatus");
   if (status) status.textContent = message;
+}
+
+function normalizeElapsedMs(value) {
+  let elapsed = Number(value);
+  return Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= MAX_SAVED_TIMER_MS ? elapsed : 0;
 }
 
 function updateCloudControls() {
@@ -1238,7 +1255,9 @@ function resetAssemblyTimer() {
 }
 
 function updateAssemblyTimerDisplay() {
+  if (assemblyRunning && (!Number.isFinite(assemblyStartTime) || assemblyStartTime <= 0)) assemblyRunning = false;
   if (assemblyRunning) assemblyElapsedMs = Date.now() - assemblyStartTime;
+  assemblyElapsedMs = normalizeElapsedMs(assemblyElapsedMs);
   let seconds = assemblyElapsedMs / 1000;
   document.getElementById("assemblyTimer").innerText = seconds.toFixed(2) + " sec";
   document.getElementById("assemblyTimerMinutes").innerText = (seconds / 60).toFixed(2) + " min";
@@ -1429,7 +1448,9 @@ function pauseProcessTimer(index) {
 
 function updateProcessTimerDisplays() {
   processTimerStates.forEach((state, index) => {
+    if (state.running && (!Number.isFinite(state.startTime) || state.startTime <= 0)) state.running = false;
     if (state.running) state.elapsedMs = Date.now() - state.startTime;
+    state.elapsedMs = normalizeElapsedMs(state.elapsedMs);
     let display = document.getElementById("processTimer-" + index);
     if (display) display.innerText = subAssembliesEnabled ? (state.elapsedMs / 60000).toFixed(2) + " min" : (state.elapsedMs / 1000).toFixed(2) + " sec";
   });
@@ -1442,15 +1463,27 @@ function editProcessName(index) {
   let newName = prompt("Edit process name:", item.process);
   if (!newName || !newName.trim()) return;
   let oldName = item.process;
-  let oldSubAssembly = item.subAssembly;
-  processMaster[index].process = newName.trim();
+  let revisedName = newName.trim();
+  processMaster.forEach(process => {
+    if (process.process === oldName) process.process = revisedName;
+  });
   records.forEach(record => {
-    if (record.process === oldName && record.subAssembly === oldSubAssembly) record.process = newName.trim();
+    if (record.process === oldName) record.process = revisedName;
   });
   buildProcessTimerTable();
   updateProcessDisplay();
   updateTable();
   saveStudy();
+}
+
+function editCurrentProcessName() {
+  if (currentIndex >= 0) editProcessName(currentIndex);
+}
+
+function editProcessNameFromRecord(record) {
+  let index = processMaster.findIndex(item => item.process === record.process && (item.subAssembly || "") === (record.subAssembly || ""));
+  if (index >= 0) editProcessName(index);
+  else alert("This process is no longer in the active process list.");
 }
 
 function insertProcessAfter(index) {
@@ -1636,7 +1669,9 @@ function startTimer() {
 }
 
 function updateTimerDisplay() {
-  elapsedMs = Date.now() - startTime;
+  if (running && (!Number.isFinite(startTime) || startTime <= 0)) running = false;
+  if (running) elapsedMs = Date.now() - startTime;
+  elapsedMs = normalizeElapsedMs(elapsedMs);
   document.getElementById("timer").innerText = (elapsedMs / 1000).toFixed(2);
   document.getElementById("timerMinutes").innerText = (elapsedMs / 60000).toFixed(2) + " min";
   updateProcessTimerDisplays();
@@ -1651,6 +1686,12 @@ function pauseTimer() {
   pauseProcessTimer(currentIndex);
   pauseAllMinorActivities();
   saveStudy(true);
+}
+
+function pauseTimersForStorage() {
+  if (running) pauseTimer();
+  processTimerStates.forEach((state, index) => { if (state.running) pauseProcessTimer(index); });
+  if (assemblyRunning) pauseAssemblyTimer();
 }
 
 async function stopAndNext() {
@@ -1916,7 +1957,7 @@ function updateTable() {
 
   records.forEach((record, index) => {
     let row = document.createElement("tr");
-    appendCell(row, record.process);
+    appendEditableProcessCell(row, record);
     if (subAssembliesEnabled) appendCell(row, record.subAssembly || "-");
     appendCell(row, record.observation);
     appendCell(row, record.cycleTime);
@@ -1929,6 +1970,18 @@ function updateTable() {
     appendRemarksCell(row, record, index, "kaizen", "Edit Kaizen");
     table.appendChild(row);
   });
+}
+
+function appendEditableProcessCell(row, record) {
+  let cell = document.createElement("td");
+  let button = document.createElement("button");
+  button.type = "button";
+  button.className = "record-process-edit";
+  button.textContent = record.process;
+  button.title = "Edit this process name everywhere";
+  button.addEventListener("click", () => editProcessNameFromRecord(record));
+  cell.appendChild(button);
+  row.appendChild(cell);
 }
 
 function appendMinorActivitiesCell(row, record) {
@@ -2190,11 +2243,11 @@ function saveStudy(immediate = false) {
         shuffleEnabled: shuffleEnabled,
         importedProcesses: importedProcesses,
         processMaster: processMaster,
-        processTimerStates: processTimerStates.map(state => ({ elapsedMs: state.elapsedMs, running: state.running })),
+        processTimerStates: processTimerStates.map(state => ({ elapsedMs: normalizeElapsedMs(state.elapsedMs), running: state.running })),
         records: records,
         currentIndex: currentIndex,
-        currentTimer: { elapsedMs: elapsedMs, running: running },
-        assemblyElapsedMs: assemblyElapsedMs,
+        currentTimer: { elapsedMs: normalizeElapsedMs(elapsedMs), running: running },
+        assemblyElapsedMs: normalizeElapsedMs(assemblyElapsedMs),
         assemblyRunning: assemblyRunning,
         assemblyStudyStartedAt: assemblyStudyStartedAt ? assemblyStudyStartedAt.toISOString() : null,
         assemblyStudyEndedAt: assemblyStudyEndedAt ? assemblyStudyEndedAt.toISOString() : null,
@@ -2393,8 +2446,8 @@ async function restoreStudy(id) {
     processMaster = data.processMaster || [];
     records = data.records || [];
     currentIndex = typeof data.currentIndex === "number" ? data.currentIndex : findNextProcessIndex(0);
-    processTimerStates = (data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }))).map(state => ({ elapsedMs: state.elapsedMs || 0, startTime: 0, running: false }));
-    assemblyElapsedMs = data.assemblyElapsedMs || 0;
+    processTimerStates = (data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }))).map(state => ({ elapsedMs: normalizeElapsedMs(state.elapsedMs), startTime: 0, running: false }));
+    assemblyElapsedMs = normalizeElapsedMs(data.assemblyElapsedMs);
     assemblyStudyStartedAt = data.assemblyStudyStartedAt ? new Date(data.assemblyStudyStartedAt) : null;
     assemblyStudyEndedAt = data.assemblyStudyEndedAt ? new Date(data.assemblyStudyEndedAt) : null;
     assemblyStudyStoppedAt = data.assemblyStudyStoppedAt ? new Date(data.assemblyStudyStoppedAt) : null;
@@ -2405,24 +2458,14 @@ async function restoreStudy(id) {
     hide("processInput");
     show("study");
     resetTimer();
-    elapsedMs = data.currentTimer?.elapsedMs || 0;
+    elapsedMs = normalizeElapsedMs(data.currentTimer?.elapsedMs);
     updateAssemblyTimerDisplay();
     updateAssemblyClockDisplay();
     buildTable();
     buildProcessTimerTable();
     updateProcessDisplay();
-    let shouldResume = data.studyCompletionStatus !== "Assembly Complete";
-    if (shouldResume && data.currentTimer?.running && currentIndex >= 0) {
-      startTime = Date.now() - elapsedMs;
-      running = true;
-      interval = setInterval(updateTimerDisplay, 20);
-      let state = processTimerStates[currentIndex];
-      if (state) { state.startTime = Date.now() - state.elapsedMs; state.running = true; }
-      if (!processTimerInterval) processTimerInterval = setInterval(updateProcessTimerDisplays, 100);
-    } else {
-      updateTimerDisplay();
-    }
-    if (shouldResume && data.assemblyRunning) startAssemblyTimer();
+    updateTimerDisplay();
+    updateProcessTimerDisplays();
     saveStudy(true);
   };
 }
@@ -2456,8 +2499,13 @@ document.addEventListener("input", event => {
 document.addEventListener("change", event => {
   if (event.target.matches("input, textarea, select")) saveStudy(true);
 });
-window.addEventListener("pagehide", () => saveStudy(true));
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveStudy(true); });
+window.addEventListener("pagehide", () => { pauseTimersForStorage(); saveStudy(true); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    pauseTimersForStorage();
+    saveStudy(true);
+  }
+});
 restorePageZoom();
 protectLocalStorage();
 initialiseCloudSync();
