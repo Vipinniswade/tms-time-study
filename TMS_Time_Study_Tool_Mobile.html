@@ -778,7 +778,7 @@ let sequenceEnabled = true;
 let shuffleEnabled = false;
 let draggedProcessIndex = null;
 let pageZoom = 1;
-const MAX_SAVED_TIMER_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_SAVED_TIMER_MS = 365 * 24 * 60 * 60 * 1000;
 const STUDY_DB_NAME = "TMS_Time_Study_Data";
 const STUDY_STORE_NAME = "studies";
 const SUPABASE_URL = "https://tcizfxqhpmvziecixajm.supabase.co";
@@ -794,6 +794,12 @@ function setCloudStatus(message) {
 function normalizeElapsedMs(value) {
   let elapsed = Number(value);
   return Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= MAX_SAVED_TIMER_MS ? elapsed : 0;
+}
+
+function getValidTimerStartTime(value) {
+  let start = Number(value);
+  let now = Date.now();
+  return Number.isFinite(start) && start >= 1577836800000 && start <= now + 60000 && now - start <= MAX_SAVED_TIMER_MS ? start : 0;
 }
 
 function updateCloudControls() {
@@ -1255,7 +1261,7 @@ function resetAssemblyTimer() {
 }
 
 function updateAssemblyTimerDisplay() {
-  if (assemblyRunning && (!Number.isFinite(assemblyStartTime) || assemblyStartTime <= 0)) assemblyRunning = false;
+  if (assemblyRunning && !getValidTimerStartTime(assemblyStartTime)) assemblyRunning = false;
   if (assemblyRunning) assemblyElapsedMs = Date.now() - assemblyStartTime;
   assemblyElapsedMs = normalizeElapsedMs(assemblyElapsedMs);
   let seconds = assemblyElapsedMs / 1000;
@@ -1448,7 +1454,7 @@ function pauseProcessTimer(index) {
 
 function updateProcessTimerDisplays() {
   processTimerStates.forEach((state, index) => {
-    if (state.running && (!Number.isFinite(state.startTime) || state.startTime <= 0)) state.running = false;
+    if (state.running && !getValidTimerStartTime(state.startTime)) state.running = false;
     if (state.running) state.elapsedMs = Date.now() - state.startTime;
     state.elapsedMs = normalizeElapsedMs(state.elapsedMs);
     let display = document.getElementById("processTimer-" + index);
@@ -1669,7 +1675,7 @@ function startTimer() {
 }
 
 function updateTimerDisplay() {
-  if (running && (!Number.isFinite(startTime) || startTime <= 0)) running = false;
+  if (running && !getValidTimerStartTime(startTime)) running = false;
   if (running) elapsedMs = Date.now() - startTime;
   elapsedMs = normalizeElapsedMs(elapsedMs);
   document.getElementById("timer").innerText = (elapsedMs / 1000).toFixed(2);
@@ -1688,11 +1694,6 @@ function pauseTimer() {
   saveStudy(true);
 }
 
-function pauseTimersForStorage() {
-  if (running) pauseTimer();
-  processTimerStates.forEach((state, index) => { if (state.running) pauseProcessTimer(index); });
-  if (assemblyRunning) pauseAssemblyTimer();
-}
 
 async function stopAndNext() {
   if (currentIndex < 0) {
@@ -2243,12 +2244,13 @@ function saveStudy(immediate = false) {
         shuffleEnabled: shuffleEnabled,
         importedProcesses: importedProcesses,
         processMaster: processMaster,
-        processTimerStates: processTimerStates.map(state => ({ elapsedMs: normalizeElapsedMs(state.elapsedMs), running: state.running })),
+        processTimerStates: processTimerStates.map(state => ({ elapsedMs: normalizeElapsedMs(state.elapsedMs), running: state.running, startedAt: state.running ? state.startTime : null })),
         records: records,
         currentIndex: currentIndex,
-        currentTimer: { elapsedMs: normalizeElapsedMs(elapsedMs), running: running },
+        currentTimer: { elapsedMs: normalizeElapsedMs(elapsedMs), running: running, startedAt: running ? startTime : null },
         assemblyElapsedMs: normalizeElapsedMs(assemblyElapsedMs),
         assemblyRunning: assemblyRunning,
+        assemblyStartedAt: assemblyRunning ? assemblyStartTime : null,
         assemblyStudyStartedAt: assemblyStudyStartedAt ? assemblyStudyStartedAt.toISOString() : null,
         assemblyStudyEndedAt: assemblyStudyEndedAt ? assemblyStudyEndedAt.toISOString() : null,
         assemblyStudyStoppedAt: assemblyStudyStoppedAt ? assemblyStudyStoppedAt.toISOString() : null,
@@ -2446,8 +2448,12 @@ async function restoreStudy(id) {
     processMaster = data.processMaster || [];
     records = data.records || [];
     currentIndex = typeof data.currentIndex === "number" ? data.currentIndex : findNextProcessIndex(0);
-    processTimerStates = (data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }))).map(state => ({ elapsedMs: normalizeElapsedMs(state.elapsedMs), startTime: 0, running: false }));
-    assemblyElapsedMs = normalizeElapsedMs(data.assemblyElapsedMs);
+    processTimerStates = (data.processTimerStates || processMaster.map(() => ({ elapsedMs: 0 }))).map(state => {
+      let startedAt = state.running ? getValidTimerStartTime(state.startedAt) : 0;
+      return { elapsedMs: startedAt ? normalizeElapsedMs(Date.now() - startedAt) : normalizeElapsedMs(state.elapsedMs), startTime: startedAt, running: !!startedAt };
+    });
+    let savedAssemblyStart = data.assemblyRunning ? getValidTimerStartTime(data.assemblyStartedAt) : 0;
+    assemblyElapsedMs = savedAssemblyStart ? normalizeElapsedMs(Date.now() - savedAssemblyStart) : normalizeElapsedMs(data.assemblyElapsedMs);
     assemblyStudyStartedAt = data.assemblyStudyStartedAt ? new Date(data.assemblyStudyStartedAt) : null;
     assemblyStudyEndedAt = data.assemblyStudyEndedAt ? new Date(data.assemblyStudyEndedAt) : null;
     assemblyStudyStoppedAt = data.assemblyStudyStoppedAt ? new Date(data.assemblyStudyStoppedAt) : null;
@@ -2458,12 +2464,30 @@ async function restoreStudy(id) {
     hide("processInput");
     show("study");
     resetTimer();
-    elapsedMs = normalizeElapsedMs(data.currentTimer?.elapsedMs);
+    let savedCurrentStart = data.currentTimer?.running ? getValidTimerStartTime(data.currentTimer.startedAt) : 0;
+    elapsedMs = savedCurrentStart ? normalizeElapsedMs(Date.now() - savedCurrentStart) : normalizeElapsedMs(data.currentTimer?.elapsedMs);
     updateAssemblyTimerDisplay();
     updateAssemblyClockDisplay();
     buildTable();
     buildProcessTimerTable();
     updateProcessDisplay();
+    if (savedCurrentStart && currentIndex >= 0) {
+      startTime = savedCurrentStart;
+      running = true;
+      interval = setInterval(updateTimerDisplay, 20);
+      let activeProcessTimer = processTimerStates[currentIndex];
+      if (activeProcessTimer) {
+        activeProcessTimer.elapsedMs = elapsedMs;
+        activeProcessTimer.startTime = savedCurrentStart;
+        activeProcessTimer.running = true;
+      }
+    }
+    if (processTimerStates.some(state => state.running)) processTimerInterval = setInterval(updateProcessTimerDisplays, 100);
+    if (savedAssemblyStart) {
+      assemblyStartTime = savedAssemblyStart;
+      assemblyRunning = true;
+      assemblyInterval = setInterval(updateAssemblyTimerDisplay, 100);
+    }
     updateTimerDisplay();
     updateProcessTimerDisplays();
     saveStudy(true);
@@ -2499,13 +2523,8 @@ document.addEventListener("input", event => {
 document.addEventListener("change", event => {
   if (event.target.matches("input, textarea, select")) saveStudy(true);
 });
-window.addEventListener("pagehide", () => { pauseTimersForStorage(); saveStudy(true); });
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") {
-    pauseTimersForStorage();
-    saveStudy(true);
-  }
-});
+window.addEventListener("pagehide", () => saveStudy(true));
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveStudy(true); });
 restorePageZoom();
 protectLocalStorage();
 initialiseCloudSync();
