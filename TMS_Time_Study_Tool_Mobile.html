@@ -1051,7 +1051,7 @@ function generateProcessInputs() {
   }
 }
 
-function addProcessRow(imported = { name: "", subAssembly: "" }) {
+function addProcessRow(imported = { name: "", subAssembly: "" }, insertAfterRow = null) {
   let body = document.getElementById("processFields");
   let row = document.createElement("tr");
 
@@ -1082,17 +1082,30 @@ function addProcessRow(imported = { name: "", subAssembly: "" }) {
   }
 
   let actionCell = document.createElement("td");
+  let addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.textContent = "+";
+  addButton.title = "Add a process below this one";
+  addButton.addEventListener("click", function() {
+    addProcessRow({ name: "", subAssembly: "" }, row);
+  });
   let removeButton = document.createElement("button");
   removeButton.type = "button";
   removeButton.className = "danger";
-  removeButton.textContent = "Remove";
+  removeButton.textContent = "−";
+  removeButton.title = "Delete this process";
+  removeButton.style.marginLeft = "8px";
   removeButton.addEventListener("click", function() {
+    if (!confirm("Are you sure you want to delete this process?")) return;
+    if (!confirm("This process will be removed. Confirm delete.")) return;
     row.remove();
     renumberProcessRows();
   });
+  actionCell.appendChild(addButton);
   actionCell.appendChild(removeButton);
   row.appendChild(actionCell);
-  body.appendChild(row);
+  if (insertAfterRow) body.insertBefore(row, insertAfterRow.nextSibling);
+  else body.appendChild(row);
   renumberProcessRows();
 }
 
@@ -1243,7 +1256,7 @@ function formatClockTime(value) {
 
 function buildProcessTimerTable() {
   let table = document.getElementById("processTimerTable");
-  table.innerHTML = "<tr><th>Process</th>" + (subAssembliesEnabled ? "<th>Sub Assembly</th><th>Sub Assembly Time (Min)</th>" : "<th>Process Time (Sec)</th>") + "<th>Controls</th></tr>";
+  table.innerHTML = "<tr><th>Sr No.</th><th>Process</th>" + (subAssembliesEnabled ? "<th>Sub Assembly</th><th>Sub Assembly Time (Min)</th>" : "<th>Process Time (Sec)</th>") + "<th>Controls</th></tr>";
   document.getElementById("shuffleButton").textContent = shuffleEnabled ? "Disable Shuffle" : "Enable Shuffle";
 
   processMaster.forEach((item, index) => {
@@ -1254,6 +1267,7 @@ function buildProcessTimerTable() {
     row.addEventListener("dragend", () => { draggedProcessIndex = null; row.classList.remove("dragging"); });
     row.addEventListener("dragover", event => { if (shuffleEnabled) event.preventDefault(); });
     row.addEventListener("drop", event => { event.preventDefault(); if (shuffleEnabled && draggedProcessIndex !== null) moveProcess(draggedProcessIndex, index); });
+    appendCell(row, index + 1);
     let nameCell = document.createElement("td");
     let nameButton = document.createElement("button");
     nameButton.type = "button";
@@ -1302,14 +1316,46 @@ function buildProcessTimerTable() {
     insertButton.title = "Insert a process after this one";
     insertButton.style.marginLeft = "8px";
     insertButton.addEventListener("click", () => insertProcessAfter(index));
+    let deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "danger";
+    deleteButton.textContent = "−";
+    deleteButton.title = "Delete this process";
+    deleteButton.style.marginLeft = "8px";
+    deleteButton.addEventListener("click", () => deleteProcess(index));
     controls.appendChild(startButton);
     controls.appendChild(pauseButton);
     controls.appendChild(nextButton);
     controls.appendChild(editButton);
     controls.appendChild(insertButton);
+    controls.appendChild(deleteButton);
     row.appendChild(controls);
     table.appendChild(row);
   });
+}
+
+function deleteProcess(index) {
+  let item = processMaster[index];
+  if (!item) return;
+  if (!confirm("Are you sure you want to delete '" + item.process + "'?")) return;
+  if (!confirm("This will permanently remove this process and its recorded readings. Confirm delete.")) return;
+
+  processMaster.splice(index, 1);
+  processTimerStates.splice(index, 1);
+  records = records.filter(record => !(record.process === item.process && record.subAssembly === item.subAssembly));
+
+  if (!processMaster.length) {
+    currentIndex = 0;
+    pauseTimer();
+  } else if (currentIndex > index) {
+    currentIndex -= 1;
+  } else if (currentIndex >= processMaster.length) {
+    currentIndex = processMaster.length - 1;
+  }
+  buildProcessTimerTable();
+  updateProcessDisplay();
+  renderRecords();
+  saveStudy();
 }
 
 function startTimerForProcess(index) {
@@ -1986,7 +2032,7 @@ async function exportExcel() {
   updateProcessTimerDisplays();
   let workbook = new ExcelJS.Workbook();
   let worksheet = workbook.addWorksheet("Time Study");
-  let columns = ["Process"];
+  let columns = ["Sr No.", "Process"];
   if (subAssembliesEnabled) columns.push("Sub Assembly");
   columns.push("Observation", "Cycle Time (Sec)", "Assembly Time (Sec)", "Process Running Time (Sec)", "Worker Status", "Activity Type", "Minor Activities", "Photo 1", "Photo 2", "Remarks", "Kaizen");
   worksheet.addRow(["Study Date", new Date().toLocaleDateString()]);
@@ -2009,7 +2055,7 @@ async function exportExcel() {
   let photoColumn1 = columns.indexOf("Photo 1") + 1;
   let photoColumn2 = columns.indexOf("Photo 2") + 1;
   records.forEach((record, index) => {
-    let values = [record.process];
+    let values = [getProcessSerialNumber(record), record.process];
     if (subAssembliesEnabled) values.push(record.subAssembly || "");
     values.push(record.observation, record.cycleTime, record.assemblyTime || "", record.processRunningTime || "", record.workerStatus || "Working", record.activityType || "VA", (record.minorActivities || []).map(item => "• " + item).join("\n"), record.photoName || "", record.photoName2 || "", record.remarks || "", record.kaizen || "");
     let row = worksheet.addRow(values);
@@ -2042,6 +2088,11 @@ function getAssemblyTotalHours() {
   return ((new Date(stopTime) - new Date(assemblyStudyStartedAt)) / 3600000).toFixed(3) + " hr";
 }
 
+function getProcessSerialNumber(record) {
+  let index = processMaster.findIndex(item => item.process === record.process && (item.subAssembly || "") === (record.subAssembly || ""));
+  return index >= 0 ? index + 1 : "";
+}
+
 function getExcelImageExtension(fileName) {
   let extension = String(fileName || "").split(".").pop().toLowerCase();
   if (extension === "jpg") extension = "jpeg";
@@ -2064,15 +2115,15 @@ function exportCSV() {
   }
 
   let headers = subAssembliesEnabled
-    ? ["Process", "Sub Assembly", "Observation", "Cycle Time (Sec)", "Assembly Time (Sec)", "Process Running Time (Sec)", "Worker Status", "Activity Type", "Minor Activities", "Photo 1 Reference", "Photo 2 Reference", "Remarks", "Kaizen"]
-    : ["Process", "Observation", "Cycle Time (Sec)", "Assembly Time (Sec)", "Process Running Time (Sec)", "Worker Status", "Activity Type", "Minor Activities", "Photo 1 Reference", "Photo 2 Reference", "Remarks", "Kaizen"];
+    ? ["Sr No.", "Process", "Sub Assembly", "Observation", "Cycle Time (Sec)", "Assembly Time (Sec)", "Process Running Time (Sec)", "Worker Status", "Activity Type", "Minor Activities", "Photo 1 Reference", "Photo 2 Reference", "Remarks", "Kaizen"]
+    : ["Sr No.", "Process", "Observation", "Cycle Time (Sec)", "Assembly Time (Sec)", "Process Running Time (Sec)", "Worker Status", "Activity Type", "Minor Activities", "Photo 1 Reference", "Photo 2 Reference", "Remarks", "Kaizen"];
 
   let text = headers.join(",") + "\n";
 
   records.forEach(record => {
     let row = subAssembliesEnabled
-      ? [record.process, record.subAssembly, record.observation, record.cycleTime, record.assemblyTime || "", record.processRunningTime || "", record.workerStatus || "Working", record.activityType || "VA", (record.minorActivities || []).map(item => "• " + item).join("\n"), record.photoName || "", record.photoName2 || "", record.remarks, record.kaizen || ""]
-      : [record.process, record.observation, record.cycleTime, record.assemblyTime || "", record.processRunningTime || "", record.workerStatus || "Working", record.activityType || "VA", (record.minorActivities || []).map(item => "• " + item).join("\n"), record.photoName || "", record.photoName2 || "", record.remarks, record.kaizen || ""];
+      ? [getProcessSerialNumber(record), record.process, record.subAssembly, record.observation, record.cycleTime, record.assemblyTime || "", record.processRunningTime || "", record.workerStatus || "Working", record.activityType || "VA", (record.minorActivities || []).map(item => "• " + item).join("\n"), record.photoName || "", record.photoName2 || "", record.remarks, record.kaizen || ""]
+      : [getProcessSerialNumber(record), record.process, record.observation, record.cycleTime, record.assemblyTime || "", record.processRunningTime || "", record.workerStatus || "Working", record.activityType || "VA", (record.minorActivities || []).map(item => "• " + item).join("\n"), record.photoName || "", record.photoName2 || "", record.remarks, record.kaizen || ""];
     text += row.map(escapeCSV).join(",") + "\n";
   });
 
